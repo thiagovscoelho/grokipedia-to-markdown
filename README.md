@@ -2,6 +2,10 @@
 
 A small Python program that converts a Grokipedia article into sensible Markdown and turns Grokipedia's numbered citations into Markdown footnotes.
 
+Grokipedia infoboxes are converted to two-column Markdown tables. Lead images
+in saved pages are restored to their original Grokipedia asset URL when that
+URL is available in the page metadata.
+
 It includes both a **desktop GUI** and a **command-line interface**.
 
 ## Install
@@ -51,6 +55,16 @@ In the GUI you can:
 - preview and edit the generated Markdown;
 - copy the Markdown to the clipboard; and
 - save it as a `.md` file.
+
+For an article with an infobox, output begins in this form:
+
+```markdown
+| Attribute | Value |
+| --- | --- |
+| Image | ![Albert Einstein](https://assets.grokipedia.com/wiki/images/ebc2f4568b6a.jpg) |
+| Birth Date | March 14, 1879 |
+| Birth Place | Ulm, Kingdom of Württemberg, German Empire |
+```
 
 Network fetching is done on a worker thread, so the window stays responsive while a live page is being downloaded.
 
