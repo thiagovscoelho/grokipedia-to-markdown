@@ -2,9 +2,14 @@
 
 A small Python program that converts a Grokipedia article into sensible Markdown and turns Grokipedia's numbered citations into Markdown footnotes.
 
-Grokipedia infoboxes are converted to two-column Markdown tables. Lead images
-in saved pages are restored to their original Grokipedia asset URL when that
-URL is available in the page metadata.
+Grokipedia infoboxes are converted to two-column Markdown tables, including
+infoboxes that have no image. When a lead image is present, its image and
+caption become `Image` and `Caption` rows. Compound infoboxes with titled
+subsections (for example, several political offices followed by personal
+details) are split into separate tables under Markdown subheadings. Images
+embedded throughout the article are kept in reading order with their captions.
+Browser-saved local image paths are restored to their original Grokipedia asset
+URLs when the page metadata provides the asset host.
 
 It includes both a **desktop GUI** and a **command-line interface**.
 
@@ -61,9 +66,44 @@ For an article with an infobox, output begins in this form:
 ```markdown
 | Attribute | Value |
 | --- | --- |
-| Image | ![Albert Einstein](https://assets.grokipedia.com/wiki/images/ebc2f4568b6a.jpg) |
-| Birth Date | March 14, 1879 |
+| Image | ![Mosaic of Jesus as the Good Shepherd with sheep](https://assets.grokipedia.com/wiki/images/1af8d74d8a5d.jpg) |
+| Caption | Early Christian mosaic of Christ the Good Shepherd, Mausoleum of Galla Placidia, Ravenna |
+| Type | monotheistic |
 | Birth Place | Ulm, Kingdom of Württemberg, German Empire |
+```
+
+An infobox with no image simply begins with its first data field; no empty
+`Image` or `Caption` rows are added.
+
+Compound infoboxes are split by their own internal headings. For example:
+
+```markdown
+| Attribute | Value |
+| --- | --- |
+| Image | ![Portrait](https://assets.grokipedia.com/wiki/images/example.jpg) |
+| Caption | Official portrait |
+
+### First Office
+
+| Attribute | Value |
+| --- | --- |
+| Term | 2000–2005 |
+| Predecessor | Person A |
+
+### Second Office
+
+| Attribute | Value |
+| --- | --- |
+| Term | 1995–2000 |
+| Successor | Person B |
+```
+
+Article figures are emitted in reading order like this:
+
+```markdown
+![Crowd assembled in the Hall of Mirrors at the Palace of Versailles](https://assets.grokipedia.com/wiki/images/2be895eec1e0.jpg)
+
+*Caption:* The Hall of Mirrors during the signing ceremony of the Treaty of Versailles
 ```
 
 Network fetching is done on a worker thread, so the window stays responsive while a live page is being downloaded.

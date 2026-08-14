@@ -74,8 +74,43 @@ class Converter:
     def __init__(self, soup: BeautifulSoup, base_url: str | None = None):
         self.soup = soup
         self.base_url = base_url
+        self.asset_image_base = self._find_asset_image_base()
         self.cited: set[int] = set()
         self.references = self._collect_references()
+
+    def _find_asset_image_base(self) -> str | None:
+        """Return the directory used by Grokipedia's canonical article images.
+
+        Saved browser pages rewrite remote image URLs to local ``*_files/...``
+        paths. The Open Graph image still retains the original asset host, so
+        its directory gives us a reliable way to restore those image URLs.
+        """
+        meta = self.soup.find("meta", attrs={"property": "og:image"})
+        if not isinstance(meta, Tag) or not meta.get("content"):
+            return None
+        image_url = str(meta["content"])
+        parsed = urlparse(image_url)
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            return None
+        directory = parsed.path.rsplit("/", 1)[0] + "/"
+        return f"{parsed.scheme}://{parsed.netloc}{directory}"
+
+    def image_url(self, src: str) -> str:
+        """Resolve a Grokipedia image URL, including browser-saved pages."""
+        src = html_lib.unescape(src).strip()
+        parsed = urlparse(src)
+        if parsed.scheme in {"http", "https", "data"}:
+            return src
+
+        # Browsers save remote Grokipedia images under an article-specific
+        # ``*_files`` directory. Recover the original assets.grokipedia.com
+        # URL from the Open Graph image directory when possible.
+        if self.asset_image_base and ("_files/" in src or "_assets_/" in src):
+            filename = src.replace("\\", "/").rsplit("/", 1)[-1]
+            if filename:
+                return urljoin(self.asset_image_base, filename)
+
+        return urljoin(self.base_url or "", src)
 
     def _collect_references(self) -> dict[int, Tag]:
         refs: dict[int, Tag] = {}
@@ -181,13 +216,17 @@ class Converter:
             return f"{fence}\n{text}\n{fence}"
         if name == "hr":
             return "---"
+        if name == "aside" and tag.find("dt") is not None and tag.find("dd") is not None:
+            return self.infobox_block(tag)
+        if name == "figure":
+            return self.figure_block(tag)
         if name == "table":
             return self.table_block(tag)
         if name == "img":
             src = tag.get("src")
             alt = tag.get("alt", "")
             if src:
-                return f"![{escape_link_text(str(alt))}]({urljoin(self.base_url or '', str(src))})"
+                return f"![{escape_link_text(str(alt))}]({self.image_url(str(src))})"
             return ""
 
         # For containers, convert meaningful direct children rather than dumping
@@ -199,6 +238,162 @@ class Converter:
                 if converted:
                     parts.append(converted)
         return "\n\n".join(parts)
+
+    def _table_cell(self, text: str) -> str:
+        """Normalize inline Markdown for a pipe-table cell."""
+        text = self.clean_paragraph(text)
+        text = text.replace("  \n", "<br>").replace("\n", "<br>")
+        return text.replace("|", "\\|")
+
+    def _infobox_value(self, dd: Tag) -> str:
+        """Render an infobox value, joining Grokipedia's stacked values."""
+        # Multi-value infobox fields are commonly represented by a wrapper
+        # containing one direct <span> per item. Preserve inline formatting
+        # within each item but join the items naturally for Markdown.
+        wrappers = [c for c in dd.children if isinstance(c, Tag)]
+        if len(wrappers) == 1:
+            spans = wrappers[0].find_all("span", recursive=False)
+            if len(spans) > 1:
+                items = [self.clean_paragraph(self.inline_children(span)) for span in spans]
+                return ", ".join(item for item in items if item)
+        return self.clean_paragraph(self.inline_children(dd))
+
+    def _render_infobox_table(self, rows: list[tuple[str, str]]) -> str:
+        """Render a list of infobox key/value rows as a Markdown table."""
+        if not rows:
+            return ""
+        out = ["| Attribute | Value |", "| --- | --- |"]
+        out.extend(
+            f"| {self._table_cell(key)} | {self._table_cell(value)} |"
+            for key, value in rows
+        )
+        return "\n".join(out)
+
+    def _infobox_pair(self, dt: Tag) -> tuple[str, str] | None:
+        """Return one rendered (label, value) pair for an infobox <dt>."""
+        dd = dt.find_next_sibling("dd")
+        if not isinstance(dd, Tag):
+            return None
+        key = self.clean_paragraph(self.inline_children(dt))
+        if not key:
+            return None
+        return key, self._infobox_value(dd)
+
+    def _infobox_sections(self, aside: Tag) -> list[tuple[str, list[Tag]]]:
+        """Find Grokipedia's titled groups inside a compound infobox.
+
+        Compound biography/office infoboxes use a small uppercase heading div
+        followed by one or more row divs whose direct children are <dt>/<dd>.
+        Detecting the group structurally (with the heading styling as a guard)
+        keeps ordinary, untitled infoboxes on the original single-table path.
+        """
+        sections: list[tuple[str, list[Tag]]] = []
+        for container in aside.find_all("div"):
+            children = [c for c in container.children if isinstance(c, Tag)]
+            if len(children) < 2:
+                continue
+
+            row_dts: list[Tag] = []
+            first_row_index: int | None = None
+            for index, child in enumerate(children):
+                dt = child.find("dt", recursive=False)
+                dd = child.find("dd", recursive=False)
+                if isinstance(dt, Tag) and isinstance(dd, Tag):
+                    if first_row_index is None:
+                        first_row_index = index
+                    row_dts.append(dt)
+
+            if first_row_index is None or first_row_index == 0 or not row_dts:
+                continue
+
+            heading_tag = children[first_row_index - 1]
+            classes = set(heading_tag.get("class", []))
+            # These classes are how Grokipedia marks infobox subsection labels.
+            # Requiring at least one distinctive marker avoids mistaking layout
+            # wrappers for semantic section headings.
+            if not ({"uppercase", "tracking-wider"} & classes):
+                continue
+            if heading_tag.find(["dt", "dd", "figure", "img"]) is not None:
+                continue
+
+            heading = self.clean_paragraph(self.inline_children(heading_tag))
+            if heading:
+                sections.append((heading, row_dts))
+
+        return sections
+
+    def infobox_block(self, aside: Tag) -> str:
+        """Convert a Grokipedia infobox to one or more Markdown tables."""
+        lead_rows: list[tuple[str, str]] = []
+
+        # An infobox may or may not have a lead image. Its absence should not
+        # affect conversion of the field list.
+        figure = aside.find("figure")
+        if isinstance(figure, Tag):
+            image = figure.find("img")
+            if isinstance(image, Tag) and image.get("src"):
+                alt = str(image.get("alt", ""))
+                image_md = f"![{escape_link_text(alt)}]({self.image_url(str(image['src']))})"
+                lead_rows.append(("Image", image_md))
+
+            caption = figure.find("figcaption")
+            if isinstance(caption, Tag):
+                caption_md = self.clean_paragraph(self.inline_children(caption))
+                if caption_md:
+                    lead_rows.append(("Caption", caption_md))
+
+        sections = self._infobox_sections(aside)
+        if sections:
+            # Keep any untitled fields (if Grokipedia mixes them with titled
+            # groups) in the lead table, together with Image/Caption.
+            section_dt_ids = {id(dt) for _, dts in sections for dt in dts}
+            for dt in aside.find_all("dt"):
+                if id(dt) in section_dt_ids:
+                    continue
+                pair = self._infobox_pair(dt)
+                if pair is not None:
+                    lead_rows.append(pair)
+
+            parts: list[str] = []
+            lead_table = self._render_infobox_table(lead_rows)
+            if lead_table:
+                parts.append(lead_table)
+
+            for heading, dts in sections:
+                rows = [pair for dt in dts if (pair := self._infobox_pair(dt)) is not None]
+                table = self._render_infobox_table(rows)
+                if table:
+                    parts.append(f"### {heading}\n\n{table}")
+
+            return "\n\n".join(parts)
+
+        rows = list(lead_rows)
+        for dt in aside.find_all("dt"):
+            pair = self._infobox_pair(dt)
+            if pair is not None:
+                rows.append(pair)
+        return self._render_infobox_table(rows)
+
+    def figure_block(self, figure: Tag) -> str:
+        """Convert an article figure to a Markdown image and caption."""
+        image = figure.find("img")
+        if not isinstance(image, Tag) or not image.get("src"):
+            return ""
+
+        alt = str(image.get("alt", ""))
+        image_md = f"![{escape_link_text(alt)}]({self.image_url(str(image['src']))})"
+
+        caption = figure.find("figcaption")
+        if not isinstance(caption, Tag):
+            return image_md
+        caption_md = self.clean_paragraph(self.inline_children(caption))
+        if not caption_md:
+            return image_md
+
+        # Standard Markdown has no dedicated figure-caption syntax. A short
+        # emphasized label keeps the caption distinct from surrounding prose
+        # while allowing links, emphasis, and citations inside the caption.
+        return f"{image_md}\n\n*Caption:* {caption_md}"
 
     def list_block(self, tag: Tag, depth: int = 0) -> str:
         ordered = tag.name.lower() == "ol"
