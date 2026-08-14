@@ -70,15 +70,6 @@ def escape_inline_code(text: str) -> str:
     return f"{fence} {text} {fence}"
 
 
-def escape_table_cell(text: str) -> str:
-    """Escape text so it can safely live inside a Markdown table cell."""
-    text = text.replace("|", "\\|")
-    # Markdown tables cannot contain literal newlines within a cell. Preserve
-    # deliberate line breaks with HTML, which is widely supported by Markdown
-    # renderers, while ordinary infobox lists are handled separately below.
-    return re.sub(r"\s*\n\s*", "<br>", text).strip()
-
-
 class Converter:
     def __init__(self, soup: BeautifulSoup, base_url: str | None = None):
         self.soup = soup
@@ -168,100 +159,10 @@ class Converter:
         text = re.sub(r"[ \t]+", " ", text)
         return text
 
-    def _image_url(self, img: Tag) -> str:
-        """Return the best URL for an image, including from saved pages.
-
-        Browsers rewrite asset URLs to local ``*_files/...`` paths when a page
-        is saved. For the lead/infobox image, Grokipedia also exposes the
-        original absolute URL in Open Graph/Twitter metadata, so prefer that
-        URL when its filename matches the saved image.
-        """
-        src = str(img.get("src", "")).strip()
-        if not src:
-            return ""
-        if urlparse(src).scheme in {"http", "https"}:
-            return src
-
-        src_name = Path(urlparse(src).path).name
-        for attrs in (
-            {"property": "og:image"},
-            {"name": "twitter:image"},
-        ):
-            meta = self.soup.find("meta", attrs=attrs)
-            if isinstance(meta, Tag) and meta.get("content"):
-                candidate = str(meta["content"]).strip()
-                candidate_name = Path(urlparse(candidate).path).name
-                if src_name and candidate_name == src_name:
-                    return candidate
-
-        return urljoin(self.base_url or "", src)
-
-    def _infobox_value(self, dd: Tag) -> str:
-        """Render a Grokipedia infobox value as compact inline Markdown."""
-        # Multi-value infobox fields are commonly a flex-column div containing
-        # one span per item. Joining with commas matches the compact table style
-        # requested by the user and avoids words running together.
-        for container in dd.find_all("div", recursive=False):
-            spans = container.find_all("span", recursive=False)
-            other_tags = [
-                child for child in container.children
-                if isinstance(child, Tag) and child.name.lower() != "span"
-            ]
-            if spans and not other_tags:
-                items = [self.clean_paragraph(self.inline_children(span)) for span in spans]
-                items = [item for item in items if item]
-                if items:
-                    return ", ".join(items)
-
-        list_tag = dd.find(["ul", "ol"], recursive=False)
-        if isinstance(list_tag, Tag):
-            items = [
-                self.clean_paragraph(self.inline_children(li))
-                for li in list_tag.find_all("li", recursive=False)
-            ]
-            items = [item for item in items if item]
-            if items:
-                return ", ".join(items)
-
-        return self.clean_paragraph(self.inline_children(dd))
-
-    def infobox_block(self, aside: Tag) -> str:
-        """Convert a Grokipedia definition-list-style infobox to Markdown."""
-        pairs: list[tuple[str, str]] = []
-
-        img = aside.find("img", src=True)
-        if isinstance(img, Tag):
-            src = self._image_url(img)
-            if src:
-                alt = str(img.get("alt", "")).strip()
-                if not alt:
-                    caption = aside.find("figcaption")
-                    alt = caption.get_text(" ", strip=True) if isinstance(caption, Tag) else "Image"
-                pairs.append(("Image", f"![{escape_link_text(alt)}]({src})"))
-
-        for dt in aside.find_all("dt"):
-            dd = dt.find_next_sibling("dd")
-            if not isinstance(dd, Tag):
-                continue
-            label = self.clean_paragraph(self.inline_children(dt))
-            value = self._infobox_value(dd)
-            if label or value:
-                pairs.append((label, value))
-
-        if not pairs:
-            return ""
-
-        out = ["| Attribute | Value |", "| --- | --- |"]
-        for label, value in pairs:
-            out.append(f"| {escape_table_cell(label)} | {escape_table_cell(value)} |")
-        return "\n".join(out)
-
     def block(self, tag: Tag) -> str:
         name = tag.name.lower()
         if tag.get("id") == "references":
             return ""
-        if name == "aside" and tag.find("dt") is not None and tag.find("dd") is not None:
-            return self.infobox_block(tag)
         if name in {"h1", "h2", "h3", "h4", "h5", "h6"}:
             level = int(name[1])
             return f"{'#' * level} {self.clean_paragraph(self.inline_children(tag))}"
@@ -283,10 +184,10 @@ class Converter:
         if name == "table":
             return self.table_block(tag)
         if name == "img":
-            src = self._image_url(tag)
+            src = tag.get("src")
             alt = tag.get("alt", "")
             if src:
-                return f"![{escape_link_text(str(alt))}]({src})"
+                return f"![{escape_link_text(str(alt))}]({urljoin(self.base_url or '', str(src))})"
             return ""
 
         # For containers, convert meaningful direct children rather than dumping
